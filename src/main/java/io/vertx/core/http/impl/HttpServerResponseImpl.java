@@ -78,8 +78,8 @@ public class HttpServerResponseImpl implements HttpServerResponse {
   	this.conn = conn;
     this.version = request.getProtocolVersion();
     this.response = new DefaultHttpResponse(version, HttpResponseStatus.OK, false);
-    this.keepAlive = version == HttpVersion.HTTP_1_1 ||
-        (version == HttpVersion.HTTP_1_0 && request.headers().contains(io.vertx.core.http.HttpHeaders.CONNECTION, HttpHeaders.KEEP_ALIVE, true));
+    this.keepAlive = (version == HttpVersion.HTTP_1_1 && !request.headers().contains(io.vertx.core.http.HttpHeaders.CONNECTION, HttpHeaders.CLOSE, true))
+      || (version == HttpVersion.HTTP_1_0 && request.headers().contains(io.vertx.core.http.HttpHeaders.CONNECTION, HttpHeaders.KEEP_ALIVE, true));
   }
 
   @Override
@@ -328,14 +328,14 @@ public class HttpServerResponseImpl implements HttpServerResponse {
   }
 
   @Override
-  public HttpServerResponseImpl sendFile(String filename) {
-    doSendFile(filename, null);
+  public HttpServerResponseImpl sendFile(String filename, long offset, long length) {
+    doSendFile(filename, offset, length, null);
     return this;
   }
 
   @Override
-  public HttpServerResponse sendFile(String filename, Handler<AsyncResult<Void>> resultHandler) {
-    doSendFile(filename, resultHandler);
+  public HttpServerResponse sendFile(String filename, long start, long end, Handler<AsyncResult<Void>> resultHandler) {
+    doSendFile(filename, start, end, resultHandler);
     return this;
   }
 
@@ -343,6 +343,13 @@ public class HttpServerResponseImpl implements HttpServerResponse {
   public boolean ended() {
     synchronized (conn) {
       return written;
+    }
+  }
+
+  @Override
+  public boolean closed() {
+    synchronized (conn) {
+      return closed;
     }
   }
 
@@ -404,6 +411,7 @@ public class HttpServerResponseImpl implements HttpServerResponse {
 
     if (!keepAlive) {
       closeConnAfterWrite();
+      closed = true;
     }
     written = true;
     conn.responseComplete();
@@ -412,16 +420,16 @@ public class HttpServerResponseImpl implements HttpServerResponse {
     }
   }
 
-  private void doSendFile(String filename, Handler<AsyncResult<Void>> resultHandler) {
+  private void doSendFile(String filename, long offset, long length, Handler<AsyncResult<Void>> resultHandler) {
     synchronized (conn) {
       if (headWritten) {
         throw new IllegalStateException("Head already written");
       }
       checkWritten();
       File file = vertx.resolveFile(filename);
-      long fileLength = file.length();
+      long contentLength = Math.min(length, file.length() - offset);
       if (!contentLengthSet()) {
-        putHeader(HttpHeaders.CONTENT_LENGTH, String.valueOf(fileLength));
+        putHeader(HttpHeaders.CONTENT_LENGTH, String.valueOf(contentLength));
       }
       if (!contentTypeSet()) {
         int li = filename.lastIndexOf('.');
@@ -435,12 +443,18 @@ public class HttpServerResponseImpl implements HttpServerResponse {
       }
       prepareHeaders(() -> {
 
-        RandomAccessFile raf;
+        RandomAccessFile raf = null;
         try {
           raf = new RandomAccessFile(file, "r");
           conn.queueForWrite(response);
-          conn.sendFile(raf, fileLength);
+          conn.sendFile(raf, Math.min(offset, file.length()), contentLength);
         } catch (IOException e) {
+          try {
+            if (raf != null) {
+              raf.close();
+            }
+          } catch (IOException ignore) {
+          }
           if (resultHandler != null) {
             ContextImpl ctx = vertx.getOrCreateContext();
             ctx.runOnContext((v) -> resultHandler.handle(Future.failedFuture(e)));
@@ -532,10 +546,12 @@ public class HttpServerResponseImpl implements HttpServerResponse {
   private void prepareHeaders(Runnable after) {
     if (version == HttpVersion.HTTP_1_0 && keepAlive) {
       response.headers().set(HttpHeaders.CONNECTION, HttpHeaders.KEEP_ALIVE);
+    } else if (version == HttpVersion.HTTP_1_1 && !keepAlive) {
+      response.headers().set(HttpHeaders.CONNECTION, HttpHeaders.CLOSE);
     }
     if (chunked) {
       response.headers().set(HttpHeaders.TRANSFER_ENCODING, HttpHeaders.CHUNKED);
-    } else if (version != HttpVersion.HTTP_1_0 && !contentLengthSet()) {
+    } else if (keepAlive && !contentLengthSet()) {
       response.headers().set(HttpHeaders.CONTENT_LENGTH, "0");
     }
 
