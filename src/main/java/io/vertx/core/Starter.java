@@ -51,7 +51,9 @@ import java.util.jar.Manifest;
  * {@code java -jar myapp.jar}
  *
  * @author <a href="http://tfox.org">Tim Fox</a>
+ * @deprecated Use {@link Launcher} instead
  */
+@Deprecated
 public class Starter {
 
   public static final String VERTX_OPTIONS_PROP_PREFIX = "vertx.options.";
@@ -123,32 +125,30 @@ public class Starter {
 
     PROCESS_ARGS = Collections.unmodifiableList(Arrays.asList(sargs));
 
-    if (sargs.length > 0) {
-      String first = sargs[0];
-      if (first.equals("-version")) {
-        log.info(getVersion());
-        return;
-      } else if (first.equals("run")) {
-        if (sargs.length < 2) {
-          displaySyntax();
-          return;
-        } else {
-          String main = sargs[1];
-          runVerticle(main, args);
-          return;
-        }
-      } else if (first.equals("-ha")) {
-        // Create a bare instance
-        runBare(args);
-        return;
-      }
-    }
-
     String main = readMainVerticleFromManifest();
-
     if (main != null) {
       runVerticle(main, args);
     } else {
+      if (sargs.length > 0) {
+        String first = sargs[0];
+        if (first.equals("-version")) {
+          log.info(getVersion());
+          return;
+        } else if (first.equals("run")) {
+          if (sargs.length < 2) {
+            displaySyntax();
+            return;
+          } else {
+            main = sargs[1];
+            runVerticle(main, args);
+            return;
+          }
+        } else if (first.equals("-ha")) {
+          // Create a bare instance
+          runBare(args);
+          return;
+        }
+      }
       displaySyntax();
     }
   }

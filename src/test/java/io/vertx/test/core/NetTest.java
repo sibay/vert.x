@@ -20,12 +20,12 @@ import io.vertx.core.*;
 import io.vertx.core.buffer.Buffer;
 import io.vertx.core.eventbus.Message;
 import io.vertx.core.eventbus.MessageConsumer;
+import io.vertx.core.http.ClientAuth;
 import io.vertx.core.impl.*;
 import io.vertx.core.json.JsonArray;
 import io.vertx.core.json.JsonObject;
 import io.vertx.core.net.*;
 import io.vertx.core.net.impl.SocketAddressImpl;
-import io.vertx.core.net.impl.SocketDefaults;
 import org.junit.Assume;
 import org.junit.Rule;
 import org.junit.Test;
@@ -117,12 +117,12 @@ public class NetTest extends VertxTestBase {
     assertEquals(options, options.setTcpNoDelay(false));
     assertFalse(options.isTcpNoDelay());
 
-    boolean tcpKeepAlive = SocketDefaults.instance.isTcpKeepAlive();
+    boolean tcpKeepAlive = false;
     assertEquals(tcpKeepAlive, options.isTcpKeepAlive());
     assertEquals(options, options.setTcpKeepAlive(!tcpKeepAlive));
     assertEquals(!tcpKeepAlive, options.isTcpKeepAlive());
 
-    int soLinger = SocketDefaults.instance.getSoLinger();
+    int soLinger = -1;
     assertEquals(soLinger, options.getSoLinger());
     rand = TestUtils.randomPositiveInt();
     assertEquals(options, options.setSoLinger(rand));
@@ -211,12 +211,12 @@ public class NetTest extends VertxTestBase {
     assertEquals(options, options.setTcpNoDelay(false));
     assertFalse(options.isTcpNoDelay());
 
-    boolean tcpKeepAlive = SocketDefaults.instance.isTcpKeepAlive();
+    boolean tcpKeepAlive = false;
     assertEquals(tcpKeepAlive, options.isTcpKeepAlive());
     assertEquals(options, options.setTcpKeepAlive(!tcpKeepAlive));
     assertEquals(!tcpKeepAlive, options.isTcpKeepAlive());
 
-    int soLinger = SocketDefaults.instance.getSoLinger();
+    int soLinger = -1;
     assertEquals(soLinger, options.getSoLinger());
     rand = TestUtils.randomPositiveInt();
     assertEquals(options, options.setSoLinger(rand));
@@ -247,7 +247,7 @@ public class NetTest extends VertxTestBase {
     assertEquals(options, options.setTrustStoreOptions(trustStoreOptions));
     assertEquals(trustStoreOptions, options.getTrustOptions());
 
-    assertEquals(1024, options.getAcceptBacklog());
+    assertEquals(-1, options.getAcceptBacklog());
     rand = TestUtils.randomPositiveInt();
     assertEquals(options, options.setAcceptBacklog(rand));
     assertEquals(rand, options.getAcceptBacklog());
@@ -1086,7 +1086,7 @@ public class NetTest extends VertxTestBase {
       options.setKeyStoreOptions(new JksOptions().setPath(findFileOnClasspath("tls/server-keystore.jks")).setPassword("wibble"));
     }
     if (requireClientAuth) {
-      options.setClientAuthRequired(true);
+      options.setClientAuth(ClientAuth.REQUIRED);
     }
     for (String suite: enabledCipherSuites) {
       options.addEnabledCipherSuite(suite);

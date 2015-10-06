@@ -953,6 +953,23 @@ public class DeploymentTest extends VertxTestBase {
   }
 
   @Test
+  public void testDeployWhenClosedShouldFail() throws Exception {
+    CountDownLatch closed = new CountDownLatch(1);
+    vertx.close(ar -> {
+      assertTrue(ar.succeeded());
+      closed.countDown();
+    });
+    awaitLatch(closed);
+    vertx.deployVerticle(new AbstractVerticle() {
+    }, ar -> {
+      assertFalse(ar.succeeded());
+      assertEquals("Vert.x closed", ar.cause().getMessage());
+      testComplete();
+    });
+    await();
+  }
+
+  @Test
   public void testIsolationGroup1() throws Exception {
     List<String> isolatedClasses = Arrays.asList(TestVerticle.class.getCanonicalName());
     vertx.deployVerticle("java:" + TestVerticle.class.getCanonicalName(),
@@ -1185,6 +1202,27 @@ public class DeploymentTest extends VertxTestBase {
       }));
     }));
     await();
+  }
+  
+  @Test
+  public void testUndeployWhenUndeployIsInProgress() throws Exception {
+    int numIts = 10;
+    CountDownLatch latch = new CountDownLatch(numIts);
+    for (int i = 0; i < numIts; i++) {
+      Verticle parent = new AbstractVerticle() {
+        @Override
+        public void start() throws Exception {
+          vertx.deployVerticle(new AbstractVerticle() {
+          }, id -> vertx.undeploy(id.result()));
+        }
+      };
+      vertx.deployVerticle(parent, id -> {
+        vertx.undeploy(id.result(), res -> {
+          latch.countDown();
+        });
+      });
+    }
+    awaitLatch(latch);
   }
 
   // TODO

@@ -19,6 +19,7 @@ package io.vertx.core.impl;
 import io.netty.channel.EventLoop;
 import io.netty.channel.EventLoopGroup;
 import io.vertx.core.*;
+import io.vertx.core.impl.launcher.VertxCommandLauncher;
 import io.vertx.core.json.JsonObject;
 import io.vertx.core.logging.Logger;
 import io.vertx.core.logging.LoggerFactory;
@@ -36,14 +37,16 @@ import java.util.concurrent.atomic.AtomicInteger;
 /**
  * @author <a href="http://tfox.org">Tim Fox</a>
  */
-public abstract class ContextImpl implements Context {
+public abstract class ContextImpl implements ContextInternal {
 
   private static final Logger log = LoggerFactory.getLogger(ContextImpl.class);
 
   private static final String THREAD_CHECKS_PROP_NAME = "vertx.threadChecks";
   private static final String DISABLE_TIMINGS_PROP_NAME = "vertx.disableContextTimings";
+  private static final String DISABLE_TCCL_PROP_NAME = "vertx.disableTCCL";
   private static final boolean THREAD_CHECKS = Boolean.getBoolean(THREAD_CHECKS_PROP_NAME);
   private static final boolean DISABLE_TIMINGS = Boolean.getBoolean(DISABLE_TIMINGS_PROP_NAME);
+  private static final boolean DISABLE_TCCL = Boolean.getBoolean(DISABLE_TCCL_PROP_NAME);
 
   protected final VertxInternal owner;
   protected final String deploymentID;
@@ -60,6 +63,9 @@ public abstract class ContextImpl implements Context {
 
   protected ContextImpl(VertxInternal vertx, Executor orderedInternalPoolExec, Executor workerExec, String deploymentID, JsonObject config,
                         ClassLoader tccl) {
+    if (DISABLE_TCCL && !tccl.getClass().getName().equals("sun.misc.Launcher$AppClassLoader")) {
+      log.warn("You have disabled TCCL checks but you have a custom TCCL to set.");
+    }
     this.orderedInternalPoolExec = orderedInternalPoolExec;
     this.workerExec = workerExec;
     this.deploymentID = deploymentID;
@@ -85,10 +91,12 @@ public abstract class ContextImpl implements Context {
 
   private static void setContext(VertxThread thread, ContextImpl context) {
     thread.setContext(context);
-    if (context != null) {
-      context.setTCCL();
-    } else {
-      Thread.currentThread().setContextClassLoader(null);
+    if (!DISABLE_TCCL) {
+      if (context != null) {
+        context.setTCCL();
+      } else {
+        Thread.currentThread().setContextClassLoader(null);
+      }
     }
   }
 
@@ -220,6 +228,7 @@ public abstract class ContextImpl implements Context {
   protected abstract void checkCorrectThread();
 
   // Run the task asynchronously on this same context
+  @Override
   public void runOnContext(Handler<Void> task) {
     try {
       executeAsync(task);
@@ -240,10 +249,12 @@ public abstract class ContextImpl implements Context {
 
   @Override
   public List<String> processArgs() {
-    return Starter.PROCESS_ARGS;
+    // As we are maintaining the launcher and starter class, choose the right one.
+    List<String> processArgument = VertxCommandLauncher.getProcessArguments();
+    return processArgument != null ? processArgument : Starter.PROCESS_ARGS;
   }
 
-  public EventLoop eventLoop() {
+  public EventLoop nettyEventLoop() {
     return eventLoop;
   }
 
@@ -256,8 +267,14 @@ public abstract class ContextImpl implements Context {
     executeBlocking(action, null, true, true, resultHandler);
   }
 
+  @Override
   public <T> void executeBlocking(Handler<Future<T>> blockingCodeHandler, boolean ordered, Handler<AsyncResult<T>> resultHandler) {
     executeBlocking(null, blockingCodeHandler, false, ordered, resultHandler);
+  }
+
+  @Override
+  public <T> void executeBlocking(Handler<Future<T>> blockingCodeHandler, Handler<AsyncResult<T>> resultHandler) {
+    executeBlocking(blockingCodeHandler, true, resultHandler);
   }
 
   protected synchronized Map<String, Object> contextData() {
@@ -295,7 +312,11 @@ public abstract class ContextImpl implements Context {
 
   protected Runnable wrapTask(ContextTask cTask, Handler<Void> hTask, boolean checkThread) {
     return () -> {
-      VertxThread current = getCurrentThread();
+      Thread th = Thread.currentThread();
+      if (!(th instanceof VertxThread)) {
+        throw new IllegalStateException("Uh oh! Event loop context executing with wrong thread! Expected " + contextThread + " got " + th);
+      }
+      VertxThread current = (VertxThread) th;
       if (THREAD_CHECKS && checkThread) {
         if (contextThread == null) {
           contextThread = current;
@@ -323,10 +344,6 @@ public abstract class ContextImpl implements Context {
         }
       }
     };
-  }
-
-  private VertxThread getCurrentThread() {
-    return (VertxThread) Thread.currentThread();
   }
 
   private void setTCCL() {

@@ -99,6 +99,7 @@ public class VertxImpl implements VertxInternal, MetricsProvider {
   private final OrderedExecutorFactory internalOrderedFact;
   private final ThreadFactory eventLoopThreadFactory;
   private final NioEventLoopGroup eventLoopGroup;
+  private final NioEventLoopGroup acceptorEventLoopGroup;
   private final BlockedThreadChecker checker;
   private final boolean haEnabled;
   private EventBusImpl eventBus;
@@ -114,11 +115,20 @@ public class VertxImpl implements VertxInternal, MetricsProvider {
   }
 
   VertxImpl(VertxOptions options, Handler<AsyncResult<Vertx>> resultHandler) {
+    // Sanity check
+    if (Vertx.currentContext() != null) {
+      log.warn("You're already on a Vert.x context, are you sure you want to create a new Vertx instance?");
+    }
     checker = new BlockedThreadChecker(options.getBlockedThreadCheckInterval(), options.getMaxEventLoopExecuteTime(),
                                        options.getMaxWorkerExecuteTime(), options.getWarningExceptionTime());
     eventLoopThreadFactory = new VertxThreadFactory("vert.x-eventloop-thread-", checker, false);
     eventLoopGroup = new NioEventLoopGroup(options.getEventLoopPoolSize(), eventLoopThreadFactory);
     eventLoopGroup.setIoRatio(NETTY_IO_RATIO);
+    ThreadFactory acceptorEventLoopThreadFactory = new VertxThreadFactory("vert.x-acceptor-thread-", checker, false);
+    // The acceptor event loop thread needs to be from a different pool otherwise can get lags in accepted connections
+    // under a lot of load
+    acceptorEventLoopGroup = new NioEventLoopGroup(1, acceptorEventLoopThreadFactory);
+    acceptorEventLoopGroup.setIoRatio(100);
     workerPool = Executors.newFixedThreadPool(options.getWorkerPoolSize(),
                                               new VertxThreadFactory("vert.x-worker-thread-", checker, true));
     internalBlockingPool = Executors.newFixedThreadPool(options.getInternalBlockingPoolSize(),
@@ -143,13 +153,8 @@ public class VertxImpl implements VertxInternal, MetricsProvider {
             EventBusImpl.EventBusNetServer ebServer = new EventBusImpl.EventBusNetServer(server);
             server.listen(asyncResult -> {
               if (asyncResult.succeeded()) {
-                // Obtain system configured public host/port
-                int publicPort = Integer.getInteger("vertx.cluster.public.port", -1);
-                String publicHost = System.getProperty("vertx.cluster.public.host", null);
-
-                // If using a wilcard port (0) then we ask the server for the actual port:
-                int serverPort = publicPort == -1 ? server.actualPort() : publicPort;
-                String serverHost = publicHost == null ? options.getClusterHost() : publicHost;
+                int serverPort = getClusterPublicPort(options, server.actualPort());
+                String serverHost = getClusterPublicHost(options);
                 ServerID serverID = new ServerID(serverPort, serverHost);
                 // Provide a memory barrier as we are setting from a different thread
                 synchronized (VertxImpl.this) {
@@ -294,6 +299,10 @@ public class VertxImpl implements VertxInternal, MetricsProvider {
     return eventLoopGroup;
   }
 
+  public EventLoopGroup getAcceptorEventLoopGroup() {
+    return acceptorEventLoopGroup;
+  }
+
   public ContextImpl getOrCreateContext() {
     ContextImpl ctx = getContext();
     if (ctx == null) {
@@ -338,6 +347,25 @@ public class VertxImpl implements VertxInternal, MetricsProvider {
   @Override
   public DnsClient createDnsClient(int port, String host) {
     return new DnsClientImpl(this, port, host);
+  }
+
+  private int getClusterPublicPort(VertxOptions options, int actualPort) {
+    // We retain the old system property for backwards compat
+    int publicPort = Integer.getInteger("vertx.cluster.public.port", options.getClusterPublicPort());
+    if (publicPort == -1) {
+      // Get the actual port, wildcard port of zero might have been specified
+      publicPort = actualPort;
+    }
+    return publicPort;
+  }
+
+  private String getClusterPublicHost(VertxOptions options) {
+    // We retain the old system property for backwards compat
+    String publicHost = System.getProperty("vertx.cluster.public.host", options.getClusterPublicHost());
+    if (publicHost == null) {
+      publicHost = options.getClusterHost();
+    }
+    return publicHost;
   }
 
   private VertxMetrics initialiseMetrics(VertxOptions options) {
@@ -500,7 +528,15 @@ public class VertxImpl implements VertxInternal, MetricsProvider {
 
   @Override
   public void deployVerticle(Verticle verticle, DeploymentOptions options, Handler<AsyncResult<String>> completionHandler) {
-    deploymentManager.deployVerticle(verticle, options, completionHandler);
+    boolean closed;
+    synchronized (this) {
+      closed = this.closed;
+    }
+    if (closed) {
+      completionHandler.handle(Future.failedFuture("Vert.x closed"));
+    } else {
+      deploymentManager.deployVerticle(verticle, options, completionHandler);
+    }
   }
 
   @Override
@@ -639,23 +675,31 @@ public class VertxImpl implements VertxInternal, MetricsProvider {
       workerPool.shutdownNow();
       internalBlockingPool.shutdownNow();
 
-      eventLoopGroup.shutdownGracefully(0, 10, TimeUnit.SECONDS).addListener(new GenericFutureListener() {
+      acceptorEventLoopGroup.shutdownGracefully(0, 10, TimeUnit.SECONDS).addListener(new GenericFutureListener() {
         @Override
         public void operationComplete(io.netty.util.concurrent.Future future) throws Exception {
           if (!future.isSuccess()) {
-            log.warn("Failure in shutting down event loop group", future.cause());
+            log.warn("Failure in shutting down acceptor event loop group", future.cause());
           }
-          if (metrics != null) {
-            metrics.close();
-          }
+          eventLoopGroup.shutdownGracefully(0, 10, TimeUnit.SECONDS).addListener(new GenericFutureListener() {
+            @Override
+            public void operationComplete(io.netty.util.concurrent.Future future) throws Exception {
+              if (!future.isSuccess()) {
+                log.warn("Failure in shutting down event loop group", future.cause());
+              }
+              if (metrics != null) {
+                metrics.close();
+              }
 
-          checker.close();
+              checker.close();
 
-          if (completionHandler != null) {
-            eventLoopThreadFactory.newThread(() -> {
-              completionHandler.handle(Future.succeededFuture());
-            }).start();
-          }
+              if (completionHandler != null) {
+                eventLoopThreadFactory.newThread(() -> {
+                  completionHandler.handle(Future.succeededFuture());
+                }).start();
+              }
+            }
+          });
         }
       });
     });
@@ -690,7 +734,7 @@ public class VertxImpl implements VertxInternal, MetricsProvider {
       this.timerID = timerID;
       this.handler = runnable;
       this.periodic = periodic;
-      EventLoop el = context.eventLoop();
+      EventLoop el = context.nettyEventLoop();
       Runnable toRun = () -> context.runOnContext(this);
       if (periodic) {
         future = el.scheduleAtFixedRate(toRun, delay, delay, TimeUnit.MILLISECONDS);

@@ -28,6 +28,7 @@ import java.net.URL;
 import java.net.URLClassLoader;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -136,23 +137,37 @@ public class DeploymentManager {
             deployVerticle(resolvedName, options, completionHandler);
             return;
           } else {
-            Verticle[] verticles = new Verticle[options.getInstances()];
-            try {
-              for (int i = 0; i < options.getInstances(); i++) {
-                verticles[i] = verticleFactory.createVerticle(identifier, cl);
-                if (verticles[i] == null) {
-                  throw new NullPointerException("VerticleFactory::createVerticle returned null");
+            if (verticleFactory.blockingCreate()) {
+              vertx.<Verticle[]>executeBlocking(createFut -> {
+                try {
+                  Verticle[] verticles = createVerticles(verticleFactory, identifier, options.getInstances(), cl);
+                  createFut.complete(verticles);
+                } catch (Exception e) {
+                  createFut.fail(e);
                 }
-              }
-              doDeploy(identifier, deploymentID, options, parentContext, callingContext, completionHandler, cl, verticles);
+              }, res -> {
+                if (res.succeeded()) {
+                  doDeploy(identifier, deploymentID, options, parentContext, callingContext, completionHandler, cl, res.result());
+                } else {
+                  // Try the next one
+                  doDeployVerticle(iter, res.cause(), identifier, deploymentID, options, parentContext, callingContext, cl, completionHandler);
+                }
+              });
               return;
-            } catch (Exception e) {
-              err = e;
+            } else {
+              try {
+                Verticle[] verticles = createVerticles(verticleFactory, identifier, options.getInstances(), cl);
+                doDeploy(identifier, deploymentID, options, parentContext, callingContext, completionHandler, cl, verticles);
+                return;
+              } catch (Exception e) {
+                err = e;
+              }
             }
           }
         } else {
           err = ar.cause();
         }
+        // Try the next one
         doDeployVerticle(iter, err, identifier, deploymentID, options, parentContext, callingContext, cl, completionHandler);
       });
     } else {
@@ -163,6 +178,17 @@ public class DeploymentManager {
         // not handled or impossible ?
       }
     }
+  }
+
+  private Verticle[] createVerticles(VerticleFactory verticleFactory, String identifier, int instances, ClassLoader cl) throws Exception {
+    Verticle[] verticles = new Verticle[instances];
+    for (int i = 0; i < instances; i++) {
+      verticles[i] = verticleFactory.createVerticle(identifier, cl);
+      if (verticles[i] == null) {
+        throw new NullPointerException("VerticleFactory::createVerticle returned null");
+      }
+    }
+    return verticles;
   }
 
   private String getSuffix(int pos, String str) {
@@ -438,7 +464,7 @@ public class DeploymentManager {
     private final Deployment parent;
     private final String deploymentID;
     private final String verticleIdentifier;
-    private List<VerticleHolder> verticles = new ArrayList<>();
+    private final List<VerticleHolder> verticles = new CopyOnWriteArrayList<>();
     private final Set<Deployment> children = new ConcurrentHashSet<>();
     private final DeploymentOptions options;
     private boolean undeployed;
@@ -458,18 +484,20 @@ public class DeploymentManager {
     @Override
     public void undeploy(Handler<AsyncResult<Void>> completionHandler) {
       ContextImpl currentContext = vertx.getOrCreateContext();
-      if (!undeployed) {
-        doUndeploy(currentContext, completionHandler);
-      } else {
-        reportFailure(new IllegalStateException("Already undeployed"), currentContext, completionHandler);
-      }
+      doUndeploy(currentContext, completionHandler);
     }
 
-    public void doUndeploy(ContextImpl undeployingContext, Handler<AsyncResult<Void>> completionHandler) {
+    public synchronized void doUndeploy(ContextImpl undeployingContext, Handler<AsyncResult<Void>> completionHandler) {
+      if (undeployed) {
+        reportFailure(new IllegalStateException("Already undeployed"), undeployingContext, completionHandler);
+        return;
+      }
       if (!children.isEmpty()) {
         final int size = children.size();
         AtomicInteger childCount = new AtomicInteger();
+        boolean undeployedSome = false;
         for (Deployment childDeployment: new HashSet<>(children)) {
+          undeployedSome = true;
           childDeployment.doUndeploy(undeployingContext, ar -> {
             children.remove(childDeployment);
             if (ar.failed()) {
@@ -480,9 +508,14 @@ public class DeploymentManager {
             }
           });
         }
+        if (!undeployedSome) {
+          // It's possible that children became empty before iterating
+          doUndeploy(undeployingContext, completionHandler);
+        }
       } else {
         undeployed = true;
         AtomicInteger undeployCount = new AtomicInteger();
+        int numToUndeploy = verticles.size();
         for (VerticleHolder verticleHolder: verticles) {
           ContextImpl context = verticleHolder.context;
           context.runOnContext(v -> {
@@ -497,7 +530,7 @@ public class DeploymentManager {
                   // Log error but we report success anyway
                   log.error("Failed to run close hook", ar2.cause());
                 }
-                if (ar.succeeded() && undeployCount.incrementAndGet() == verticles.size()) {
+                if (ar.succeeded() && undeployCount.incrementAndGet() == numToUndeploy) {
                   reportSuccess(null, undeployingContext, completionHandler);
                 } else if (ar.failed() && !failureReported.get()) {
                   failureReported.set(true);

@@ -16,9 +16,18 @@
 
 package io.vertx.test.core;
 
+import io.vertx.core.AbstractVerticle;
 import io.vertx.core.Context;
+import io.vertx.core.DeploymentOptions;
+import io.vertx.core.Future;
 import io.vertx.core.Vertx;
+import io.vertx.core.impl.ContextImpl;
+import io.vertx.core.impl.ContextInternal;
 import org.junit.Test;
+
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * @author <a href="http://tfox.org">Tim Fox</a>
@@ -87,6 +96,85 @@ public class ContextTest extends VertxTestBase {
       Context otherContext = other.getOrCreateContext();
       assertNotSame(otherContext, context);
       testComplete();
+    });
+    await();
+  }
+
+  @Test
+  public void testExecuteOrderedBlocking() throws Exception {
+    Context context = vertx.getOrCreateContext();
+    context.executeBlocking(f -> {
+      assertTrue(Context.isOnWorkerThread());
+      f.complete(1 + 2);
+    }, r -> {
+      assertTrue(Context.isOnEventLoopThread());
+      assertEquals(r.result(), 3);
+      testComplete();
+    });
+    await();
+  }
+
+  @Test
+  public void testExecuteUnorderedBlocking() throws Exception {
+    Context context = vertx.getOrCreateContext();
+    context.executeBlocking(f -> {
+      assertTrue(Context.isOnWorkerThread());
+      f.complete(1 + 2);
+    }, false, r -> {
+      assertTrue(Context.isOnEventLoopThread());
+      assertEquals(r.result(), 3);
+      testComplete();
+    });
+    await();
+  }
+
+  @Test
+  public void testEventLoopExecuteFromIo() throws Exception {
+    ContextInternal eventLoopContext = (ContextInternal) vertx.getOrCreateContext();
+
+    // Check from other thread
+    try {
+      eventLoopContext.executeFromIO(this::fail);
+      fail();
+    } catch (IllegalStateException expected) {
+    }
+
+    // Check from event loop thread
+    eventLoopContext.nettyEventLoop().execute(() -> {
+      // Should not be set yet
+      assertNull(Vertx.currentContext());
+      Thread vertxThread = Thread.currentThread();
+      AtomicBoolean nested = new AtomicBoolean(true);
+      eventLoopContext.executeFromIO(() -> {
+        assertTrue(nested.get());
+        assertSame(eventLoopContext, Vertx.currentContext());
+        assertSame(vertxThread, Thread.currentThread());
+      });
+      nested.set(false);
+      testComplete();
+    });
+    await();
+  }
+
+  @Test
+  public void testWorkerExecuteFromIo() throws Exception {
+    AtomicReference<ContextInternal> workerContext = new AtomicReference<>();
+    CountDownLatch latch = new CountDownLatch(1);
+    vertx.deployVerticle(new AbstractVerticle() {
+      @Override
+      public void start() throws Exception {
+        workerContext.set((ContextInternal) context);
+        latch.countDown();
+      }
+    }, new DeploymentOptions().setWorker(true));
+    awaitLatch(latch);
+    workerContext.get().nettyEventLoop().execute(() -> {
+      assertNull(Vertx.currentContext());
+      workerContext.get().executeFromIO(() -> {
+        assertSame(workerContext.get(), Vertx.currentContext());
+        assertTrue(Context.isOnWorkerThread());
+        testComplete();
+      });
     });
     await();
   }

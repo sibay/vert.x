@@ -710,13 +710,13 @@ public class EventBusImpl implements EventBus, MetricsProvider {
         HandlerHolder holder = handlers.choose();
         if (holder != null) {
           metrics.messageReceived(msg.address(), !msg.send(), local, 1);
-          doReceive(msg, holder, local);
+          doReceive(msg, holder);
         }
       } else {
         // Publish
         metrics.messageReceived(msg.address(), !msg.send(), local, handlers.list.size());
         for (HandlerHolder holder: handlers.list) {
-          doReceive(msg, holder, local);
+          doReceive(msg, holder);
         }
       }
     } else {
@@ -737,12 +737,12 @@ public class EventBusImpl implements EventBus, MetricsProvider {
   private <T> void sendNoHandlersFailure(String address, Handler<AsyncResult<Message<T>>> handler) {
     vertx.runOnContext(v -> {
       metrics.replyFailure(address, ReplyFailure.NO_HANDLERS);
-      handler.handle(Future.failedFuture(new ReplyException(ReplyFailure.NO_HANDLERS)));
+      handler.handle(Future.failedFuture(new ReplyException(ReplyFailure.NO_HANDLERS, "No handlers for address " + address)));
     });
   }
 
 
-  private <T> void doReceive(MessageImpl msg, HandlerHolder<T> holder, boolean local) {
+  private <T> void doReceive(MessageImpl msg, HandlerHolder<T> holder) {
     // Each handler gets a fresh copy
     @SuppressWarnings("unchecked")
     Message<T> copied = msg.copyBeforeReceive();
@@ -1091,26 +1091,38 @@ public class EventBusImpl implements EventBus, MetricsProvider {
     }
 
     @Override
-    public synchronized void handle(Message<T> event) {
-      if (paused) {
-        if (pending.size() < maxBufferedMessages) {
-          pending.add(event);
-        } else {
-          if (discardHandler != null) {
-            discardHandler.handle(event);
+    public void handle(Message<T> message) {
+      Handler<Message<T>> theHandler = null;
+      synchronized (this) {
+        if (paused) {
+          if (pending.size() < maxBufferedMessages) {
+            pending.add(message);
+          } else {
+            if (discardHandler != null) {
+              discardHandler.handle(message);
+            }
           }
+        } else {
+          checkNextTick();
+          MessageImpl abc = (MessageImpl) message;
+          metrics.beginHandleMessage(metric, abc.getSocket() == null);
+          theHandler = handler;
         }
-      } else {
-        checkNextTick();
-        MessageImpl abc = (MessageImpl) event;
-        metrics.beginHandleMessage(metric, abc.getSocket() == null);
-        try {
-          handler.handle(event);
-          metrics.endHandleMessage(metric, null);
-        } catch (Exception e) {
-          metrics.endHandleMessage(metric, e);
-          throw e;
-        }
+      }
+      // Handle the message outside the sync block
+      // https://bugs.eclipse.org/bugs/show_bug.cgi?id=473714
+      if (theHandler != null) {
+        handleMessage(theHandler, message);
+      }
+    }
+
+    private void handleMessage(Handler<Message<T>> theHandler, Message<T> message) {
+      try {
+        theHandler.handle(message);
+        metrics.endHandleMessage(metric, null);
+      } catch (Exception e) {
+        metrics.endHandleMessage(metric, e);
+        throw e;
       }
     }
 

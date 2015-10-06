@@ -28,7 +28,6 @@ import io.vertx.core.impl.*;
 import io.vertx.core.json.JsonArray;
 import io.vertx.core.json.JsonObject;
 import io.vertx.core.net.*;
-import io.vertx.core.net.impl.SocketDefaults;
 import io.vertx.core.streams.Pump;
 import org.junit.Assume;
 import org.junit.Rule;
@@ -107,12 +106,12 @@ public class HttpTest extends HttpTestBase {
     assertEquals(options, options.setTcpNoDelay(false));
     assertFalse(options.isTcpNoDelay());
 
-    boolean tcpKeepAlive = SocketDefaults.instance.isTcpKeepAlive();
+    boolean tcpKeepAlive = false;
     assertEquals(tcpKeepAlive, options.isTcpKeepAlive());
     assertEquals(options, options.setTcpKeepAlive(!tcpKeepAlive));
     assertEquals(!tcpKeepAlive, options.isTcpKeepAlive());
 
-    int soLinger = SocketDefaults.instance.getSoLinger();
+    int soLinger = -1;
     assertEquals(soLinger, options.getSoLinger());
     rand = TestUtils.randomPositiveInt();
     assertEquals(options, options.setSoLinger(rand));
@@ -224,12 +223,12 @@ public class HttpTest extends HttpTestBase {
     assertEquals(options, options.setTcpNoDelay(false));
     assertFalse(options.isTcpNoDelay());
 
-    boolean tcpKeepAlive = SocketDefaults.instance.isTcpKeepAlive();
+    boolean tcpKeepAlive = false;
     assertEquals(tcpKeepAlive, options.isTcpKeepAlive());
     assertEquals(options, options.setTcpKeepAlive(!tcpKeepAlive));
     assertEquals(!tcpKeepAlive, options.isTcpKeepAlive());
 
-    int soLinger = SocketDefaults.instance.getSoLinger();
+    int soLinger = -1;
     assertEquals(soLinger, options.getSoLinger());
     rand = TestUtils.randomPositiveInt();
     assertEquals(options, options.setSoLinger(rand));
@@ -259,7 +258,7 @@ public class HttpTest extends HttpTestBase {
     assertEquals(options, options.setTrustStoreOptions(trustStoreOptions));
     assertEquals(trustStoreOptions, options.getTrustOptions());
 
-    assertEquals(1024, options.getAcceptBacklog());
+    assertEquals(-1, options.getAcceptBacklog());
     rand = TestUtils.randomPositiveInt();
     assertEquals(options, options.setAcceptBacklog(rand));
     assertEquals(rand, options.getAcceptBacklog());
@@ -1030,11 +1029,10 @@ public class HttpTest extends HttpTestBase {
     waitFor(2);
     AtomicInteger cnt = new AtomicInteger();
     server.requestHandler(req -> {
-      req.response().headersEndHandler(fut -> {
+      req.response().headersEndHandler(v -> {
         // Insert another header
         req.response().putHeader("extraheader", "wibble");
         assertEquals(0, cnt.getAndIncrement());
-        fut.complete();
       });
       req.response().bodyEndHandler(v -> {
         assertEquals(1, cnt.getAndIncrement());
@@ -1056,11 +1054,10 @@ public class HttpTest extends HttpTestBase {
     waitFor(2);
     AtomicInteger cnt = new AtomicInteger();
     server.requestHandler(req -> {
-      req.response().headersEndHandler(fut -> {
+      req.response().headersEndHandler(v -> {
         // Insert another header
         req.response().putHeader("extraheader", "wibble");
         assertEquals(0, cnt.getAndIncrement());
-        fut.complete();
       });
       req.response().bodyEndHandler(v -> {
         assertEquals(1, cnt.getAndIncrement());
@@ -1087,11 +1084,10 @@ public class HttpTest extends HttpTestBase {
     String content = "iqdioqwdqwiojqwijdwqd";
     File toSend = setupFile("somefile.txt", content);
     server.requestHandler(req -> {
-      req.response().headersEndHandler(fut -> {
+      req.response().headersEndHandler(v -> {
         // Insert another header
         req.response().putHeader("extraheader", "wibble");
         assertEquals(0, cnt.getAndIncrement());
-        fut.complete();
       });
       req.response().bodyEndHandler(v -> {
         assertEquals(1, cnt.getAndIncrement());
@@ -1739,7 +1735,7 @@ public class HttpTest extends HttpTestBase {
     }).listen(DEFAULT_HTTP_PORT, onSuccess(s -> {
       // Exception handler should be called for any requests in the pipeline if connection is closed
       client.request(HttpMethod.GET, DEFAULT_HTTP_PORT, DEFAULT_HTTP_HOST, DEFAULT_TEST_URI, resp ->
-              resp.exceptionHandler(t -> testComplete())).exceptionHandler(error -> fail()).end();
+          resp.exceptionHandler(t -> testComplete())).exceptionHandler(error -> fail()).end();
     }));
     await();
   }
@@ -2293,6 +2289,31 @@ public class HttpTest extends HttpTestBase {
 
     testComplete();
   }
+
+  @Test
+  public void testSendNonExistingFile() throws Exception {
+    server.requestHandler(req -> {
+      final Context ctx = vertx.getOrCreateContext();
+      req.response().sendFile("/not/existing/path", event -> {
+        assertEquals(ctx, vertx.getOrCreateContext());
+        if (event.failed()) {
+          req.response().end("failed");
+        }
+      });
+    });
+
+    server.listen(onSuccess(s -> {
+      client.request(HttpMethod.GET, DEFAULT_HTTP_PORT, DEFAULT_HTTP_HOST, DEFAULT_TEST_URI, resp -> {
+        resp.bodyHandler(buff -> {
+          assertEquals("failed", buff.toString());
+          testComplete();
+        });
+      }).end();
+    }));
+
+    await();
+  }
+
 
   @Test
   public void testSendFileOverrideHeaders() throws Exception {
@@ -2967,7 +2988,7 @@ public class HttpTest extends HttpTestBase {
     setOptions(serverOptions, getServerTrustOptions(serverTrust));
     setOptions(serverOptions, getServerCertOptions(serverCert));
     if (requireClientAuth) {
-      serverOptions.setClientAuthRequired(true);
+      serverOptions.setClientAuth(ClientAuth.REQUIRED);
     }
     if (serverUsesCrl) {
       serverOptions.addCrlPath(findFileOnClasspath("tls/ca/crl.pem"));
@@ -3029,7 +3050,9 @@ public class HttpTest extends HttpTestBase {
 
   @Test
   public void testPKCS12InvalidPassword() {
-    testInvalidKeyStore(((PfxOptions) getServerCertOptions(KeyCert.PKCS12)).setPassword("wrongpassword"), "failed to decrypt safe contents entry: javax.crypto.BadPaddingException: Given final block not properly padded", null);
+    testInvalidKeyStore(((PfxOptions) getServerCertOptions(KeyCert.PKCS12)).setPassword("wrongpassword"), Arrays.asList(
+        "failed to decrypt safe contents entry: javax.crypto.BadPaddingException: Given final block not properly padded",
+        "keystore password was incorrect"), null);
   }
 
   @Test
@@ -3106,7 +3129,15 @@ public class HttpTest extends HttpTestBase {
     setOptions(serverOptions, options);
     serverOptions.setSsl(true);
     serverOptions.setPort(4043);
-    testStore(serverOptions, expectedPrefix, expectedSuffix);
+    testStore(serverOptions, Collections.singletonList(expectedPrefix), expectedSuffix);
+  }
+
+  private void testInvalidKeyStore(KeyCertOptions options, List<String> expectedPossiblePrefixes, String expectedSuffix) {
+    HttpServerOptions serverOptions = new HttpServerOptions();
+    setOptions(serverOptions, options);
+    serverOptions.setSsl(true);
+    serverOptions.setPort(4043);
+    testStore(serverOptions, expectedPossiblePrefixes, expectedSuffix);
   }
 
   private void testInvalidTrustStore(TrustOptions options, String expectedPrefix, String expectedSuffix) {
@@ -3114,10 +3145,10 @@ public class HttpTest extends HttpTestBase {
     setOptions(serverOptions, options);
     serverOptions.setSsl(true);
     serverOptions.setPort(4043);
-    testStore(serverOptions, expectedPrefix, expectedSuffix);
+    testStore(serverOptions, Collections.singletonList(expectedPrefix), expectedSuffix);
   }
 
-  private void testStore(HttpServerOptions serverOptions, String expectedPrefix, String expectedSuffix) {
+  private void testStore(HttpServerOptions serverOptions, List<String> expectedPossiblePrefixes, String expectedSuffix) {
     HttpServer server = vertx.createHttpServer(serverOptions);
     server.requestHandler(req -> {
     });
@@ -3126,10 +3157,22 @@ public class HttpTest extends HttpTestBase {
       fail("Was expecting a failure");
     } catch (VertxException e) {
       assertNotNull(e.getCause());
-      if(expectedSuffix == null)
-        assertEquals(expectedPrefix, e.getCause().getMessage());
-      else {
-        assertTrue(e.getCause().getMessage().startsWith(expectedPrefix));
+      if(expectedSuffix == null) {
+        boolean ok = expectedPossiblePrefixes.isEmpty();
+        for (String expectedPossiblePrefix : expectedPossiblePrefixes) {
+          ok |= expectedPossiblePrefix.equals(e.getCause().getMessage());
+        }
+        if (!ok) {
+          fail("Was expecting <" + e.getCause().getMessage() + ">  to be equals to one of " + expectedPossiblePrefixes);
+        }
+      } else {
+        boolean ok = expectedPossiblePrefixes.isEmpty();
+        for (String expectedPossiblePrefix : expectedPossiblePrefixes) {
+          ok |= e.getCause().getMessage().startsWith(expectedPossiblePrefix);
+        }
+        if (!ok) {
+          fail("Was expecting e.getCause().getMessage() to be prefixed by one of " + expectedPossiblePrefixes);
+        }
         assertTrue(e.getCause().getMessage().endsWith(expectedSuffix));
       }
     }
@@ -4468,6 +4511,38 @@ public class HttpTest extends HttpTestBase {
     await();
   }
 
+  @Test
+  public void testMultipleRecursiveCallsAndPipelining() throws Exception {
+    int sendRequests = 100;
+    AtomicInteger receivedRequests = new AtomicInteger();
+    vertx.createHttpServer()
+      .requestHandler(x -> {
+        x.response().end("hello");
+      })
+      .listen(8080, r -> {
+        if (r.succeeded()) {
+          HttpClient client = vertx.createHttpClient(new HttpClientOptions()
+              .setKeepAlive(true)
+              .setPipelining(true)
+              .setDefaultPort(8080)
+          );
+          IntStream.range(0, 5).forEach(i -> recursiveCall(client, receivedRequests, sendRequests));
+        }
+      });
+    await();
+  }
+
+  private void recursiveCall(HttpClient client, AtomicInteger receivedRequests, int sendRequests){
+    client.getNow("/", r -> {
+      int numRequests = receivedRequests.incrementAndGet();
+      if (numRequests == sendRequests) {
+        testComplete();
+      } else if (numRequests < sendRequests) {
+        recursiveCall(client, receivedRequests, sendRequests);
+      }
+    });
+  }
+
 
   private void pausingServer(Consumer<HttpServer> consumer) {
     server.requestHandler(req -> {
@@ -4572,6 +4647,77 @@ public class HttpTest extends HttpTestBase {
         .setKeepAlive(true);
       HttpClient client = vertx.createHttpClient(ops);
       IntStream.range(0, sendRequests).forEach(x -> client.getNow("/", r -> {}));
+    }));
+    await();
+  }
+
+  @Test
+  public void testTwoServersDifferentEventLoopsCloseOne() throws Exception {
+    CountDownLatch latch1 = new CountDownLatch(2);
+    AtomicInteger server1Count = new AtomicInteger();
+    AtomicInteger server2Count = new AtomicInteger();
+    vertx.createHttpServer().requestHandler(req -> {
+      server1Count.incrementAndGet();
+      req.response().end();
+    }).listen(8080, onSuccess(s -> {
+      latch1.countDown();
+    }));
+    HttpServer server2 = vertx.createHttpServer().requestHandler(req -> {
+      server2Count.incrementAndGet();
+      req.response().end();
+    }).listen(8080, onSuccess(s -> {
+      latch1.countDown();
+    }));
+    awaitLatch(latch1);
+    HttpClient client = vertx.createHttpClient(new HttpClientOptions().setKeepAlive(false).setDefaultPort(8080));
+
+    for (int i = 0; i < 2; i++) {
+      CountDownLatch latch2 = new CountDownLatch(1);
+      client.getNow("/", resp -> {
+        assertEquals(200, resp.statusCode());
+        latch2.countDown();
+      });
+      awaitLatch(latch2);
+    }
+
+    // Now close server 2
+    CountDownLatch latch3 = new CountDownLatch(1);
+    server2.close(onSuccess(v -> {
+      latch3.countDown();
+    }));
+    awaitLatch(latch3);
+    // Send some more requests
+    for (int i = 0; i < 2; i++) {
+      CountDownLatch latch2 = new CountDownLatch(1);
+      client.getNow("/", resp -> {
+        assertEquals(200, resp.statusCode());
+        latch2.countDown();
+      });
+      awaitLatch(latch2);
+    }
+
+    assertEquals(3, server1Count.get());
+    assertEquals(1, server2Count.get());
+  }
+
+
+  @Test
+  public void testSetWriteQueueMaxSize() throws Exception {
+
+    server.requestHandler(req -> {
+      HttpServerResponse resp = req.response();
+      resp.setWriteQueueMaxSize(256 * 1024);
+      // Now something bigger
+      resp.setWriteQueueMaxSize(512 * 1024);
+      // And something smaller again
+      resp.setWriteQueueMaxSize(128 * 1024);
+      resp.setWriteQueueMaxSize(129 * 1024);
+      resp.end();
+    }).listen(8080, onSuccess(s -> {
+      client.getNow(8080, "localhost", "/", resp -> {
+        assertEquals(200, resp.statusCode());
+        testComplete();
+      });
     }));
     await();
   }

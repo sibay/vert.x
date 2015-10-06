@@ -137,7 +137,9 @@ public class NetClientImpl implements NetClient, MetricsProvider {
       bootstrap.option(ChannelOption.SO_RCVBUF, options.getReceiveBufferSize());
       bootstrap.option(ChannelOption.RCVBUF_ALLOCATOR, new FixedRecvByteBufAllocator(options.getReceiveBufferSize()));
     }
-    bootstrap.option(ChannelOption.SO_LINGER, options.getSoLinger());
+    if (options.getSoLinger() != -1) {
+      bootstrap.option(ChannelOption.SO_LINGER, options.getSoLinger());
+    }
     if (options.getTrafficClass() != -1) {
       bootstrap.option(ChannelOption.IP_TOS, options.getTrafficClass());
     }
@@ -153,7 +155,7 @@ public class NetClientImpl implements NetClient, MetricsProvider {
     ContextImpl context = vertx.getOrCreateContext();
     sslHelper.validate(vertx);
     Bootstrap bootstrap = new Bootstrap();
-    bootstrap.group(context.eventLoop());
+    bootstrap.group(context.nettyEventLoop());
     bootstrap.channel(NioSocketChannel.class);
     bootstrap.handler(new ChannelInitializer<Channel>() {
       @Override
